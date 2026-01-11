@@ -16,6 +16,8 @@ export interface AccountQuota {
   name: string;
   models: ModelQuota[];
   overallHealth: HealthStatus;
+  subscriptionTier?: string;  // FREE, PRO, ULTRA
+  isForbidden?: boolean;      // Account has 403 Forbidden status
 }
 
 export interface ProviderQuotaResult {

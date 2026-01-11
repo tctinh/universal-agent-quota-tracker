@@ -75,14 +75,36 @@ export class QuotaTreeItem extends vscode.TreeItem {
     this.contextValue = 'account';
     this.iconPath = getHealthThemeIcon(account.overallHealth);
 
+    // Build description with tier and quota info
+    const parts: string[] = [];
+    
+    // Add subscription tier badge
+    if (account.subscriptionTier) {
+      const tier = account.subscriptionTier.toUpperCase();
+      if (tier.includes('ULTRA')) {
+        parts.push('💎 ULTRA');
+      } else if (tier.includes('PRO')) {
+        parts.push('⭐ PRO');
+      } else {
+        parts.push('FREE');
+      }
+    }
+
+    // Add forbidden status
+    if (account.isForbidden) {
+      parts.push('🔒 Forbidden');
+    }
+
     // Show model count and worst remaining
     const modelCount = account.models.length;
     if (modelCount > 0) {
       const minRemaining = Math.min(...account.models.map(m => m.remainingPercent));
-      this.description = `${minRemaining}% (${modelCount} models)`;
-    } else {
-      this.description = 'No quota data';
+      parts.push(`${minRemaining}% (${modelCount} models)`);
+    } else if (!account.isForbidden) {
+      parts.push('No quota data');
     }
+
+    this.description = parts.join(' · ');
   }
 
   private configureModel(model: ModelQuota): void {

@@ -2,3 +2,9 @@ out/
 node_modules/
 *.vsix
 .vscode-test/
+
+# Local tooling / reference-only folders (do not commit)
+.hive/
+.sisyphus/
+Antigravity-Manager/
+.github/agents/

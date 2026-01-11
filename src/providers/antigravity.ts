@@ -62,11 +62,54 @@ interface QuotaInfo {
   resetTime: string | null;
 }
 
+interface Tier {
+  id?: string;
+  quotaTier?: string;
+  name?: string;
+  slug?: string;
+}
+
+interface LoadCodeAssistResponse {
+  cloudaicompanionProject?: string;
+  currentTier?: Tier;
+  paidTier?: Tier;
+}
+
+interface ProjectInfo {
+  projectId: string | null;
+  subscriptionTier: string | null;
+}
+
+const DEFAULT_PROJECT_ID = 'bamboo-precept-lgxtn';
+const MAX_RETRIES = 3;
+const INITIAL_RETRY_DELAY_MS = 1000;
+
+/**
+ * Sleep helper for retry backoff
+ */
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 interface AccountWithToken {
   email: string;
   source: string;
   accessToken: string;
 }
+
+interface QuotaResult {
+  models: ModelQuota[];
+  isForbidden: boolean;
+}
+
+// Model grouping configuration matching Antigravity-Manager
+// API returns model names like: gemini-3-pro-high, gemini-3-flash, gemini-3-pro-image, claude-sonnet-4-5-thinking
+const MODEL_GROUPS = {
+  'Gemini 3 Pro': ['gemini-3-pro-high', 'gemini-3-pro'],
+  'Gemini 3 Flash': ['gemini-3-flash'],
+  'Gemini 3 Image': ['gemini-3-pro-image', 'gemini-3-image'],
+  'Claude / GPT': ['claude-sonnet-4-5-thinking', 'claude', 'gpt'],
+} as const;
 
 export class AntigravityProvider extends BaseQuotaProvider {
   readonly id = 'antigravity';
@@ -204,12 +247,18 @@ export class AntigravityProvider extends BaseQuotaProvider {
 
       for (const account of accountSources) {
         try {
-          const models = await this.fetchModelQuotas(account.accessToken);
+          // First fetch project info (project ID and subscription tier)
+          const projectInfo = await this.fetchProjectInfo(account.accessToken);
+          const projectId = projectInfo.projectId || DEFAULT_PROJECT_ID;
+          
+          const quotaResult = await this.fetchModelQuotas(account.accessToken, projectId);
           accounts.push({
             id: account.email,
             name: account.email,
-            models,
-            overallHealth: calculateOverallHealth(models),
+            models: quotaResult.models,
+            overallHealth: quotaResult.isForbidden ? 'critical' : calculateOverallHealth(quotaResult.models),
+            subscriptionTier: projectInfo.subscriptionTier || undefined,
+            isForbidden: quotaResult.isForbidden || undefined,
           });
         } catch {
           accounts.push({
@@ -254,65 +303,130 @@ export class AntigravityProvider extends BaseQuotaProvider {
     }
   }
 
-  private async fetchModelQuotas(accessToken: string): Promise<ModelQuota[]> {
+  /**
+   * Fetch project ID and subscription tier from loadCodeAssist API
+   * This matches the Antigravity-Manager reference implementation
+   */
+  private async fetchProjectInfo(accessToken: string): Promise<ProjectInfo> {
+    const CLOUD_CODE_BASE_URL = 'https://cloudcode-pa.googleapis.com';
+    
+    try {
+      const response = await fetch(`${CLOUD_CODE_BASE_URL}/v1internal:loadCodeAssist`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+          'User-Agent': 'antigravity/windows/amd64',
+        },
+        body: JSON.stringify({ metadata: { ideType: 'ANTIGRAVITY' } }),
+      });
+
+      if (!response.ok) {
+        return { projectId: null, subscriptionTier: null };
+      }
+
+      const data = await response.json() as LoadCodeAssistResponse;
+      
+      // Priority: paidTier.id > currentTier.id (matches reference implementation)
+      const subscriptionTier = data.paidTier?.id || data.currentTier?.id || null;
+      
+      return {
+        projectId: data.cloudaicompanionProject || null,
+        subscriptionTier,
+      };
+    } catch {
+      return { projectId: null, subscriptionTier: null };
+    }
+  }
+
+  private async fetchModelQuotas(accessToken: string, projectId: string): Promise<QuotaResult> {
     for (const endpoint of ANTIGRAVITY_ENDPOINTS) {
-      try {
-        const response = await fetch(`${endpoint}/v1internal:fetchAvailableModels`, {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${accessToken}`,
-            'Content-Type': 'application/json',
-            ...ANTIGRAVITY_HEADERS,
-          },
-          body: '{}',
-        });
-        if (!response.ok) continue;
-
-        const data = await response.json() as { models?: Record<string, { quotaInfo?: QuotaInfo }> };
-        
-        const groups: Record<string, { remaining: number; resetTime?: Date; count: number }> = {
-          'Gemini 3 Flash': { remaining: 100, count: 0 },
-          'Gemini 3 Pro': { remaining: 100, count: 0 },
-          'Claude / GPT': { remaining: 100, count: 0 },
-        };
-
-        for (const [modelId, modelInfo] of Object.entries(data.models || {})) {
-          const remainingFraction = modelInfo.quotaInfo?.remainingFraction ?? 1;
-          const remainingPercent = Math.round(remainingFraction * 100);
-          const resetTime = modelInfo.quotaInfo?.resetTime ? new Date(modelInfo.quotaInfo.resetTime) : undefined;
-
-          let groupKey: string | null = null;
-          if (modelId.includes('gemini-3') && modelId.includes('flash')) {
-            groupKey = 'Gemini 3 Flash';
-          } else if (modelId.includes('gemini-3') && modelId.includes('pro')) {
-            groupKey = 'Gemini 3 Pro';
-          } else if (modelId.includes('claude') || modelId.includes('gpt')) {
-            groupKey = 'Claude / GPT';
+      // Retry logic with exponential backoff
+      for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+        try {
+          const response = await fetch(`${endpoint}/v1internal:fetchAvailableModels`, {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${accessToken}`,
+              'Content-Type': 'application/json',
+              ...ANTIGRAVITY_HEADERS,
+            },
+            body: JSON.stringify({ project: projectId }),
+          });
+          
+          // Handle 403 Forbidden - don't retry, mark as forbidden
+          if (response.status === 403) {
+            return { models: [], isForbidden: true };
+          }
+          
+          if (!response.ok) {
+            // On non-OK response, if we have retries left, wait and retry
+            if (attempt < MAX_RETRIES) {
+              await sleep(INITIAL_RETRY_DELAY_MS * attempt);
+              continue;
+            }
+            // After all retries, try next endpoint
+            break;
           }
 
-          if (groupKey) {
-            groups[groupKey].count++;
-            if (remainingPercent < groups[groupKey].remaining) {
-              groups[groupKey].remaining = remainingPercent;
-              groups[groupKey].resetTime = resetTime;
+          const data = await response.json() as { models?: Record<string, { quotaInfo?: QuotaInfo }> };
+          
+          // Group models into 4 categories matching Antigravity-Manager
+          const groups: Record<string, { remaining: number; resetTime?: Date; found: boolean }> = {
+            'Gemini 3 Pro': { remaining: 100, found: false },
+            'Gemini 3 Flash': { remaining: 100, found: false },
+            'Gemini 3 Image': { remaining: 100, found: false },
+            'Claude / GPT': { remaining: 100, found: false },
+          };
+
+          for (const [modelId, modelInfo] of Object.entries(data.models || {})) {
+            const remainingFraction = modelInfo.quotaInfo?.remainingFraction ?? 1;
+            const remainingPercent = Math.round(remainingFraction * 100);
+            const resetTime = modelInfo.quotaInfo?.resetTime ? new Date(modelInfo.quotaInfo.resetTime) : undefined;
+
+            // Match model to group
+            let groupKey: string | null = null;
+            for (const [group, patterns] of Object.entries(MODEL_GROUPS)) {
+              if (patterns.some(pattern => modelId.includes(pattern))) {
+                groupKey = group;
+                break;
+              }
+            }
+
+            if (groupKey && groups[groupKey]) {
+              groups[groupKey].found = true;
+              // Use the lowest remaining percentage for the group
+              if (remainingPercent < groups[groupKey].remaining) {
+                groups[groupKey].remaining = remainingPercent;
+                groups[groupKey].resetTime = resetTime;
+              }
             }
           }
-        }
 
-        return Object.entries(groups)
-          .filter(([, g]) => g.count > 0)
-          .map(([name, g]) => ({
-            name,
-            displayName: name,
-            remainingPercent: g.remaining,
-            usedPercent: 100 - g.remaining,
-            resetTime: g.resetTime,
-          }));
-      } catch {
-        continue;
+          // Convert groups to ModelQuota array
+          const models: ModelQuota[] = Object.entries(groups)
+            .filter(([, g]) => g.found)
+            .map(([name, g]) => ({
+              name,
+              displayName: name,
+              remainingPercent: g.remaining,
+              usedPercent: 100 - g.remaining,
+              resetTime: g.resetTime,
+            }));
+
+          return { models, isForbidden: false };
+        } catch {
+          // On network error, if we have retries left, wait and retry
+          if (attempt < MAX_RETRIES) {
+            await sleep(INITIAL_RETRY_DELAY_MS * attempt);
+            continue;
+          }
+          // After all retries, try next endpoint
+          break;
+        }
       }
     }
-    return [];
+    return { models: [], isForbidden: false };
   }
 
   private formatModelName(modelId: string): string {
