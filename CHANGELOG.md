@@ -2,6 +2,26 @@
 
 All notable changes to the "Universal Agent Quota" extension will be documented in this file.
 
+## [0.1.3] - 2026-01-11
+
+### Fixed
+- Improved Antigravity quota retrieval to match reference implementation
+- Fixed model grouping for Antigravity: Gemini 3 Pro, Gemini 3 Flash, Gemini 3 Image, Claude/GPT
+
+### Added
+- Display subscription tier (FREE/PRO/ULTRA) for Antigravity accounts
+- 403 Forbidden status indicator for Antigravity accounts
+
+## [0.1.2] - 2026-01-11
+
+### Changed
+- Renamed extension to Universal Agent Quota Tracker
+
+## [0.1.1] - 2026-01-11
+
+### Added
+- Support for detailed Z.AI quota tracking
+
 ## [0.1.0] - 2026-01-06
 
 ### Added
