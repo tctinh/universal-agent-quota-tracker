@@ -2,6 +2,14 @@
 
 All notable changes to the "Universal Agent Quota" extension will be documented in this file.
 
+## [0.1.4] - 2026-01-19
+
+### Improved
+- Antigravity storage path detection (supports both `.config` and `.local/share`)
+- Antigravity project ID handling (prefers configured IDs, improved extraction)
+- Antigravity model matching (case-insensitive, includes display name)
+- Handling of reset times and quota percentages for Antigravity
+
 ## [0.1.3] - 2026-01-11
 
 ### Fixed

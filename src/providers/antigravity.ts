@@ -2,7 +2,7 @@ import { promises as fs } from 'node:fs';
 import { exec } from 'node:child_process';
 import { promisify } from 'node:util';
 import { join } from 'node:path';
-import { homedir, platform } from 'node:os';
+import { homedir } from 'node:os';
 import { BaseQuotaProvider } from './base';
 import { ProviderQuotaResult, AccountQuota, ModelQuota } from '../types';
 import { calculateOverallHealth } from '../utils/health';
@@ -13,19 +13,17 @@ const ANTIGRAVITY_CLIENT_ID = '1071006060591-tmhssin2h21lcre235vtolojh4g403ep.ap
 const ANTIGRAVITY_CLIENT_SECRET = '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';
 const GOOGLE_TOKEN_ENDPOINT = 'https://oauth2.googleapis.com/token';
 
-const ANTIGRAVITY_ENDPOINTS = [
-  'https://daily-cloudcode-pa.sandbox.googleapis.com',
-  'https://cloudcode-pa.googleapis.com',
-];
+const CLOUD_CODE_BASE_URL = 'https://cloudcode-pa.googleapis.com';
+const CLOUD_CODE_FALLBACK_BASE_URL = 'https://daily-cloudcode-pa.sandbox.googleapis.com';
 
 const ANTIGRAVITY_HEADERS = {
-  'User-Agent': `antigravity/1.11.5 ${platform()}/${process.arch}`,
-  'X-Goog-Api-Client': 'google-cloud-sdk vscode_cloudshelleditor/0.1',
-  'Client-Metadata': JSON.stringify({
-    ideType: 'IDE_UNSPECIFIED',
-    platform: 'PLATFORM_UNSPECIFIED',
-    pluginType: 'GEMINI'
-  })
+  'User-Agent': 'antigravity',
+};
+
+const CLOUD_CODE_METADATA = {
+  ideType: 'ANTIGRAVITY',
+  platform: 'PLATFORM_UNSPECIFIED',
+  pluginType: 'GEMINI',
 };
 
 interface OpencodeAccountV3 {
@@ -70,7 +68,7 @@ interface Tier {
 }
 
 interface LoadCodeAssistResponse {
-  cloudaicompanionProject?: string;
+  cloudaicompanionProject?: unknown;
   currentTier?: Tier;
   paidTier?: Tier;
 }
@@ -80,7 +78,6 @@ interface ProjectInfo {
   subscriptionTier: string | null;
 }
 
-const DEFAULT_PROJECT_ID = 'bamboo-precept-lgxtn';
 const MAX_RETRIES = 3;
 const INITIAL_RETRY_DELAY_MS = 1000;
 
@@ -95,11 +92,22 @@ interface AccountWithToken {
   email: string;
   source: string;
   accessToken: string;
+  projectId?: string;
+  managedProjectId?: string;
 }
 
 interface QuotaResult {
   models: ModelQuota[];
   isForbidden: boolean;
+}
+
+function extractProjectId(project: unknown): string | undefined {
+  if (typeof project === 'string' && project) return project;
+  if (project && typeof project === 'object' && 'id' in project) {
+    const id = (project as { id?: unknown }).id;
+    if (typeof id === 'string' && id) return id;
+  }
+  return undefined;
 }
 
 // Model grouping configuration matching Antigravity-Manager
@@ -116,12 +124,17 @@ export class AntigravityProvider extends BaseQuotaProvider {
   readonly displayName = 'Opencode Antigravity Auth';
   readonly shortName = 'AG';
 
-  private getOpencodeStoragePath(): string {
+  private getOpencodeStoragePaths(): string[] {
     if (process.platform === 'win32') {
-      return join(process.env.APPDATA || join(homedir(), 'AppData', 'Roaming'), 'opencode', 'antigravity-accounts.json');
+      return [join(process.env.APPDATA || join(homedir(), 'AppData', 'Roaming'), 'opencode', 'antigravity-accounts.json')];
     }
-    const xdgConfig = process.env.XDG_CONFIG_HOME || join(homedir(), '.config');
-    return join(xdgConfig, 'opencode', 'antigravity-accounts.json');
+    const home = homedir();
+    const xdgConfig = process.env.XDG_CONFIG_HOME || join(home, '.config');
+    const xdgData = process.env.XDG_DATA_HOME || join(home, '.local', 'share');
+    return [
+      join(xdgConfig, 'opencode', 'antigravity-accounts.json'),
+      join(xdgData, 'opencode', 'antigravity-accounts.json'),
+    ];
   }
 
   private getProxyAccountsPath(): string {
@@ -157,6 +170,8 @@ export class AntigravityProvider extends BaseQuotaProvider {
           email: acc.email || 'opencode-account',
           source: 'opencode',
           accessToken: token,
+          projectId: acc.projectId,
+          managedProjectId: acc.managedProjectId,
         });
       }
     }
@@ -200,13 +215,16 @@ export class AntigravityProvider extends BaseQuotaProvider {
   }
 
   private async loadOpencodeAccounts(): Promise<OpencodeAccountV3[]> {
-    try {
-      const content = await fs.readFile(this.getOpencodeStoragePath(), 'utf-8');
-      const storage = JSON.parse(content) as OpencodeStorageV3;
-      return storage.accounts || [];
-    } catch {
-      return [];
+    for (const p of this.getOpencodeStoragePaths()) {
+      try {
+        const content = await fs.readFile(p, 'utf-8');
+        const storage = JSON.parse(content) as OpencodeStorageV3;
+        return storage.accounts || [];
+      } catch {
+        // try next path
+      }
     }
+    return [];
   }
 
   private async loadProxyAccounts(): Promise<ProxyAccount[]> {
@@ -247,9 +265,9 @@ export class AntigravityProvider extends BaseQuotaProvider {
 
       for (const account of accountSources) {
         try {
-          // First fetch project info (project ID and subscription tier)
+          // Fetch project info (project ID and subscription tier). Prefer configured project IDs if present.
           const projectInfo = await this.fetchProjectInfo(account.accessToken);
-          const projectId = projectInfo.projectId || DEFAULT_PROJECT_ID;
+          const projectId = account.projectId || account.managedProjectId || projectInfo.projectId || undefined;
           
           const quotaResult = await this.fetchModelQuotas(account.accessToken, projectId);
           accounts.push({
@@ -308,17 +326,15 @@ export class AntigravityProvider extends BaseQuotaProvider {
    * This matches the Antigravity-Manager reference implementation
    */
   private async fetchProjectInfo(accessToken: string): Promise<ProjectInfo> {
-    const CLOUD_CODE_BASE_URL = 'https://cloudcode-pa.googleapis.com';
-    
     try {
       const response = await fetch(`${CLOUD_CODE_BASE_URL}/v1internal:loadCodeAssist`, {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${accessToken}`,
           'Content-Type': 'application/json',
-          'User-Agent': 'antigravity/windows/amd64',
+          ...ANTIGRAVITY_HEADERS,
         },
-        body: JSON.stringify({ metadata: { ideType: 'ANTIGRAVITY' } }),
+        body: JSON.stringify({ metadata: CLOUD_CODE_METADATA }),
       });
 
       if (!response.ok) {
@@ -331,7 +347,7 @@ export class AntigravityProvider extends BaseQuotaProvider {
       const subscriptionTier = data.paidTier?.id || data.currentTier?.id || null;
       
       return {
-        projectId: data.cloudaicompanionProject || null,
+        projectId: extractProjectId(data.cloudaicompanionProject) || null,
         subscriptionTier,
       };
     } catch {
@@ -339,8 +355,9 @@ export class AntigravityProvider extends BaseQuotaProvider {
     }
   }
 
-  private async fetchModelQuotas(accessToken: string, projectId: string): Promise<QuotaResult> {
-    for (const endpoint of ANTIGRAVITY_ENDPOINTS) {
+  private async fetchModelQuotas(accessToken: string, projectId?: string): Promise<QuotaResult> {
+    const endpoints = [CLOUD_CODE_BASE_URL, CLOUD_CODE_FALLBACK_BASE_URL];
+    for (const endpoint of endpoints) {
       // Retry logic with exponential backoff
       for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
         try {
@@ -351,7 +368,7 @@ export class AntigravityProvider extends BaseQuotaProvider {
               'Content-Type': 'application/json',
               ...ANTIGRAVITY_HEADERS,
             },
-            body: JSON.stringify({ project: projectId }),
+            body: JSON.stringify(projectId ? { project: projectId } : {}),
           });
           
           // Handle 403 Forbidden - don't retry, mark as forbidden
@@ -369,7 +386,9 @@ export class AntigravityProvider extends BaseQuotaProvider {
             break;
           }
 
-          const data = await response.json() as { models?: Record<string, { quotaInfo?: QuotaInfo }> };
+          const data = await response.json() as {
+            models?: Record<string, { displayName?: string; quotaInfo?: QuotaInfo }>;
+          };
           
           // Group models into 4 categories matching Antigravity-Manager
           const groups: Record<string, { remaining: number; resetTime?: Date; found: boolean }> = {
@@ -380,14 +399,18 @@ export class AntigravityProvider extends BaseQuotaProvider {
           };
 
           for (const [modelId, modelInfo] of Object.entries(data.models || {})) {
-            const remainingFraction = modelInfo.quotaInfo?.remainingFraction ?? 1;
-            const remainingPercent = Math.round(remainingFraction * 100);
-            const resetTime = modelInfo.quotaInfo?.resetTime ? new Date(modelInfo.quotaInfo.resetTime) : undefined;
+            const quotaInfo = modelInfo.quotaInfo;
+            if (!quotaInfo) continue;
+
+            const remainingFraction = quotaInfo.remainingFraction ?? 0;
+            const remainingPercent = Math.round(Math.min(1, Math.max(0, remainingFraction)) * 100);
+            const resetTime = quotaInfo.resetTime ? new Date(quotaInfo.resetTime) : undefined;
+            const candidates = [modelId.toLowerCase(), (modelInfo.displayName || '').toLowerCase()];
 
             // Match model to group
             let groupKey: string | null = null;
             for (const [group, patterns] of Object.entries(MODEL_GROUPS)) {
-              if (patterns.some(pattern => modelId.includes(pattern))) {
+              if (patterns.some(pattern => candidates.some(c => c.includes(pattern.toLowerCase())))) {
                 groupKey = group;
                 break;
               }
@@ -398,7 +421,7 @@ export class AntigravityProvider extends BaseQuotaProvider {
               // Use the lowest remaining percentage for the group
               if (remainingPercent < groups[groupKey].remaining) {
                 groups[groupKey].remaining = remainingPercent;
-                groups[groupKey].resetTime = resetTime;
+                groups[groupKey].resetTime = resetTime && !isNaN(resetTime.getTime()) ? resetTime : undefined;
               }
             }
           }
