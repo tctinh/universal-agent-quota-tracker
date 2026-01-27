@@ -10,7 +10,7 @@ Monitor quota for AI CLI tools in VS Code with a sidebar panel and status bar.
 | **Claude Code** | OAuth | macOS Keychain or `~/.claude/.credentials.json` |
 | **Codex CLI** | OAuth + API Key | `~/.codex/auth.json` or `OPENAI_API_KEY` |
 | **Gemini CLI** | OAuth 2.0 | `~/.gemini/oauth_creds.json` |
-| **Z.AI** | API Key | `$ZAI_API_KEY` environment variable |
+| **Z.AI** | API Key | VS Code Settings or `$ZAI_API_KEY` |
 
 ## Features
 
@@ -43,6 +43,7 @@ Monitor quota for AI CLI tools in VS Code with a sidebar panel and status bar.
 | `universalQuota.notifications.enabled` | true | Enable low quota notifications |
 | `universalQuota.notifications.warningThreshold` | 20 | Warning at this % remaining |
 | `universalQuota.notifications.criticalThreshold` | 5 | Critical warning at this % |
+| `universalQuota.providers.zai.apiKey` | `""` | Z.AI (Zhipu/GLM) API Key (supersedes env vars) |
 
 ## Requirements
 
@@ -52,7 +53,7 @@ Each provider reads credentials from its respective CLI tool:
 - **Claude Code**: Run `claude` to authenticate
 - **Codex CLI**: `codex login`
 - **Gemini CLI**: Run `gemini` to authenticate
-- **Z.AI**: Set `ZAI_API_KEY` environment variable
+- **Z.AI**: Set `universalQuota.providers.zai.apiKey` in settings or `ZAI_API_KEY` environment variable
 
 ## License
 
