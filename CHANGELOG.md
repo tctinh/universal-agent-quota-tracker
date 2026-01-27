@@ -2,6 +2,19 @@
 
 All notable changes to the "Universal Agent Quota" extension will be documented in this file.
 
+## [0.1.6] - 2026-01-27
+
+### Fixed
+- Gemini CLI token refresh now retries on 401/403 authentication errors
+- Treats missing or invalid `expiry_date` as expired, triggering refresh before first API call
+
+### Added
+- GLM (Zhipu) API key configuration via VSCode settings (`universalQuota.providers.zai.apiKey`)
+- Settings-based API keys take precedence over environment variables and stored secrets
+
+### Changed
+- Updated documentation to reflect new GLM key configuration method
+
 ## [0.1.4] - 2026-01-19
 
 ### Improved
