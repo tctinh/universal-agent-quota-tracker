@@ -9,6 +9,13 @@ const GOOGLE_TOKEN_ENDPOINT = 'https://oauth2.googleapis.com/token';
 const GEMINI_CODE_ASSIST_ENDPOINT = 'https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist';
 const GEMINI_QUOTA_ENDPOINT = 'https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota';
 
+export class AuthError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'AuthError';
+  }
+}
+
 // Gemini CLI OAuth credentials (extracted from gemini-cli)
 const GEMINI_CLIENT_ID = '539823621889-cfr6vts0pu7g8e1aq8k3trqsqmq7qs9n.apps.googleusercontent.com';
 const GEMINI_CLIENT_SECRET = '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';
@@ -94,9 +101,9 @@ export class GeminiCliProvider extends BaseQuotaProvider {
     }
 
     try {
-      // Refresh token if expired
+      // Refresh token if expired or missing expiry_date
       let accessToken = creds.access_token;
-      if (creds.expiry_date && Date.now() >= creds.expiry_date) {
+      if (!creds.expiry_date || Date.now() >= creds.expiry_date) {
         const newToken = await this.refreshToken(creds);
         if (!newToken) {
           return this.createAuthExpiredResult("Run 'gemini' to re-authenticate");
@@ -104,14 +111,34 @@ export class GeminiCliProvider extends BaseQuotaProvider {
         accessToken = newToken;
       }
 
-      // Step 1: Get project ID
-      const projectId = await this.getProjectId(accessToken);
-      if (!projectId) {
-        return this.createErrorResult('Failed to get project ID');
-      }
+      // Helper to execute with a single retry on auth failure
+      const executeWithRetry = async () => {
+        try {
+          const projectId = await this.getProjectId(accessToken);
+          if (!projectId) {
+            throw new Error('Failed to get project ID');
+          }
 
-      // Step 2: Get quota
-      const quotas = await this.getQuota(accessToken, projectId);
+          return await this.getQuota(accessToken, projectId);
+        } catch (error) {
+          if (error instanceof AuthError) {
+            // Attempt one refresh and retry
+            const newToken = await this.refreshToken(creds);
+            if (newToken) {
+              accessToken = newToken;
+              const projectId = await this.getProjectId(accessToken);
+              if (!projectId) {
+                throw new Error('Failed to get project ID after retry');
+              }
+              return await this.getQuota(accessToken, projectId);
+            }
+            throw new AuthError('Auth expired and refresh failed');
+          }
+          throw error;
+        }
+      };
+
+      const quotas = await executeWithRetry();
       const models = this.parseQuotaBuckets(quotas);
 
       const account: AccountQuota = {
@@ -130,6 +157,9 @@ export class GeminiCliProvider extends BaseQuotaProvider {
         lastUpdated: new Date(),
       };
     } catch (error) {
+      if (error instanceof AuthError) {
+        return this.createAuthExpiredResult("Run 'gemini' to re-authenticate");
+      }
       return this.createErrorResult(String(error));
     }
   }
@@ -169,49 +199,49 @@ export class GeminiCliProvider extends BaseQuotaProvider {
   }
 
   private async getProjectId(accessToken: string): Promise<string | null> {
-    try {
-      const response = await fetch(GEMINI_CODE_ASSIST_ENDPOINT, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${accessToken}`,
-          'Content-Type': 'application/json',
+    const response = await fetch(GEMINI_CODE_ASSIST_ENDPOINT, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        metadata: {
+          ideType: 'IDE_UNSPECIFIED',
+          platform: 'PLATFORM_UNSPECIFIED',
+          pluginType: 'GEMINI',
         },
-        body: JSON.stringify({
-          metadata: {
-            ideType: 'IDE_UNSPECIFIED',
-            platform: 'PLATFORM_UNSPECIFIED',
-            pluginType: 'GEMINI',
-          },
-        }),
-      });
+      }),
+    });
 
-      if (!response.ok) return null;
-
-      const data = await response.json() as LoadCodeAssistResponse;
-      return data.cloudaicompanionProject || null;
-    } catch {
-      return null;
+    if (response.status === 401 || response.status === 403) {
+      throw new AuthError('Authentication failed');
     }
+
+    if (!response.ok) return null;
+
+    const data = await response.json() as LoadCodeAssistResponse;
+    return data.cloudaicompanionProject || null;
   }
 
   private async getQuota(accessToken: string, projectId: string): Promise<QuotaBucket[]> {
-    try {
-      const response = await fetch(GEMINI_QUOTA_ENDPOINT, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${accessToken}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ project: projectId }),
-      });
+    const response = await fetch(GEMINI_QUOTA_ENDPOINT, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ project: projectId }),
+    });
 
-      if (!response.ok) return [];
-
-      const data = await response.json() as RetrieveQuotaResponse;
-      return data.buckets || [];
-    } catch {
-      return [];
+    if (response.status === 401 || response.status === 403) {
+      throw new AuthError('Authentication failed');
     }
+
+    if (!response.ok) return [];
+
+    const data = await response.json() as RetrieveQuotaResponse;
+    return data.buckets || [];
   }
 
   private parseQuotaBuckets(buckets: QuotaBucket[]): ModelQuota[] {
