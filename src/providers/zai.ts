@@ -48,7 +48,7 @@ export class ZaiProvider extends BaseQuotaProvider {
     const apiKey = this.getApiKey();
 
     if (!apiKey) {
-      return this.createNotConfiguredResult("Run 'Set Z.AI API Key' command");
+      return this.createNotConfiguredResult("Set API key in settings (universalQuota.providers.zai.apiKey) or run 'Set Z.AI API Key' command");
     }
 
     try {

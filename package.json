@@ -136,6 +136,11 @@
           "type": "boolean",
           "default": true,
           "description": "Enable Z.AI quota monitoring"
+        },
+        "universalQuota.providers.zai.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "Z.AI (Zhipu/GLM) API Key. If set, this takes precedence over the stored secret."
         }
       }
     }
