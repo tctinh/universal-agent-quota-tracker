@@ -2,7 +2,7 @@
   "name": "universal-agent-quota-tracker",
   "displayName": "Universal Agent Quota Tracker",
   "description": "Monitor quota for AI CLI tools: Opencode Antigravity Auth, Claude Code, Codex, Gemini CLI, and Z.AI",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "publisher": "tctinh",
   "license": "MIT",
   "icon": "media/icon.png",
