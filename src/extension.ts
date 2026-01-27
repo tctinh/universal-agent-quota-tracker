@@ -48,14 +48,13 @@ export function activate(context: vscode.ExtensionContext) {
       if (!apiKeyService) return;
       const success = await apiKeyService.promptForApiKey('zai');
       if (success) {
-        const key = await apiKeyService.getApiKey('zai');
-        setZaiApiKey(key);
+        await updateZaiApiKey(context);
         await refreshManager?.refresh();
       }
     }
   );
 
-  loadStoredApiKeys(context.secrets);
+  updateZaiApiKey(context);
 
   refreshManager.startAutoRefresh();
   refreshManager.refresh();
@@ -67,16 +66,27 @@ export function activate(context: vscode.ExtensionContext) {
     configureCommand,
     setZaiKeyCommand,
     statusBar,
-    refreshManager
+    refreshManager,
+    vscode.workspace.onDidChangeConfiguration(async e => {
+      if (e.affectsConfiguration('universalQuota.providers.zai.apiKey')) {
+        await updateZaiApiKey(context);
+        await refreshManager?.refresh();
+      }
+    })
   );
 
   console.log('Universal Agent Quota extension activated');
 }
 
-async function loadStoredApiKeys(secrets: vscode.SecretStorage): Promise<void> {
-  const zaiKey = await secrets.get('universalQuota.zai.apiKey');
-  if (zaiKey) {
-    setZaiApiKey(zaiKey);
+async function updateZaiApiKey(context: vscode.ExtensionContext): Promise<void> {
+  const config = vscode.workspace.getConfiguration('universalQuota');
+  const settingKey = config.get<string>('providers.zai.apiKey');
+  
+  if (settingKey) {
+    setZaiApiKey(settingKey);
+  } else {
+    const storedKey = await context.secrets.get('universalQuota.zai.apiKey');
+    setZaiApiKey(storedKey);
   }
 }
 
